@@ -31,39 +31,62 @@ const createCustomProduct = async (req, res) => {
     const productData = productRes.data.data.productCreate;
 
     if (productData.userErrors.length) {
-      return res.status(400).json({ step: "productCreate", errors: productData.userErrors });
+      return res.status(400).json({
+        success: false,
+        step: "productCreate",
+        errors: productData.userErrors
+      });
     }
 
     const productId = productData.product.id;
 
     // =========================
-    // 2️⃣ ADD VARIANT
+    // 2️⃣ GET DEFAULT VARIANT
     // =========================
-    const variantMutation = `
+    const getVariantQuery = `
+      query {
+        product(id: "${productId}") {
+          variants(first: 1) {
+            edges { node { id } }
+          }
+        }
+      }
+    `;
+
+    const variantFetchRes = await shopify.post("", { query: getVariantQuery });
+    const defaultVariantId =
+      variantFetchRes.data.data.product.variants.edges[0].node.id;
+
+    // =========================
+    // 3️⃣ UPDATE DEFAULT VARIANT
+    // =========================
+    const updateVariantMutation = `
       mutation {
-        productVariantsBulkCreate(
-          productId: "${productId}",
+        productVariantsBulkUpdate(
           variants: [{
+            id: "${defaultVariantId}",
             price: "${price}"
           }]
         ) {
-          productVariants { id }
+          productVariants { id price }
           userErrors { message }
         }
       }
     `;
 
-    const variantRes = await shopify.post("", { query: variantMutation });
-    const variantData = variantRes.data.data.productVariantsBulkCreate;
+    const updateRes = await shopify.post("", { query: updateVariantMutation });
+    const updateData = updateRes.data.data.productVariantsBulkUpdate;
 
-    if (variantData.userErrors.length) {
-      return res.status(400).json({ step: "variantCreate", errors: variantData.userErrors });
+    if (updateData.userErrors.length) {
+      return res.status(400).json({
+        success: false,
+        step: "variantUpdate",
+        errors: updateData.userErrors
+      });
     }
 
-    const variantId = variantData.productVariants[0].id;
-
     // =========================
-    // 3️⃣ ADD IMAGE (optional)
+    // 4️⃣ ADD IMAGE (optional)
     // =========================
     if (image) {
       const mediaMutation = `
@@ -87,10 +110,10 @@ const createCustomProduct = async (req, res) => {
     // =========================
     // ✅ SUCCESS
     // =========================
-    res.json({
+    res.status(200).json({
       success: true,
       productId,
-      variantId
+      variantId: defaultVariantId
     });
 
   } catch (error) {
