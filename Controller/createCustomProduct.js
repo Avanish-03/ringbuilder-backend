@@ -9,6 +9,7 @@ const createCustomProduct = async (req, res) => {
         productCreate(input: $input) {
           product {
             id
+            title
             variants(first: 1) {
               edges { node { id } }
             }
@@ -43,14 +44,41 @@ const createCustomProduct = async (req, res) => {
       }
     );
 
-    const variantId =
-      response.data.data.productCreate.product.variants.edges[0].node.id;
+    const result = response?.data?.data?.productCreate;
+    const product = result?.product;
+    const variantId = product?.variants?.edges?.[0]?.node?.id;
 
-    res.json({ variantId });
+    // ❌ Shopify user errors
+    if (result?.userErrors?.length) {
+      return res.status(400).json({
+        success: false,
+        userErrors: result.userErrors,
+        shopify: response.data
+      });
+    }
+
+    // ❌ No product created
+    if (!product) {
+      return res.status(500).json({
+        success: false,
+        message: "Product not created",
+        shopify: response.data
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      productId: product.id,
+      variantId,
+      shopify: response.data
+    });
 
   } catch (error) {
-    console.error(error.response?.data || error.message);
-    res.status(500).json({ message: "Product creation failed" });
+    res.status(500).json({
+      success: false,
+      message: "Product creation failed",
+      error: error.response?.data || error.message
+    });
   }
 };
 
