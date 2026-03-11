@@ -3,6 +3,7 @@ const cors = require("cors");
 require("dotenv").config();
 const diamondsRoutes = require("./Routes/diamonds");
 const settingsRoutes = require("./Routes/settings");
+const { createCustomProduct } = require("./Controller/createCustomProduct");
 
 
 const app = express();
@@ -15,6 +16,7 @@ app.get("/" , (req,res) => {
 
 app.use("/api/diamonds",diamondsRoutes);
 app.use("/api/settings",settingsRoutes);
+app.use("/api/custom-products", createCustomProduct);
 
 
 const PORT = 5000;
