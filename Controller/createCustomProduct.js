@@ -74,7 +74,25 @@ const createCustomProduct = async (req, res) => {
 
     const updateRes = await shopify.post("", { query: updateVariantMutation });
 
+    // debug
+    if (updateRes.data.errors) {
+      return res.status(500).json({
+        success: false,
+        step: "variantUpdate",
+        graphqlErrors: updateRes.data.errors
+      });
+    }
+
     const updateData = updateRes.data.data.productVariantUpdate;
+
+    if (!updateData) {
+      return res.status(500).json({
+        success: false,
+        step: "variantUpdate",
+        message: "Mutation returned no data",
+        response: updateRes.data
+      });
+    }
 
     if (updateData.userErrors.length) {
       return res.status(400).json({
