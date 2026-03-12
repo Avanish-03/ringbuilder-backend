@@ -4,7 +4,7 @@ require("dotenv").config();
 
 const diamondsRoutes = require("./Routes/diamonds");
 const settingsRoutes = require("./Routes/settings");
-const customProductsRoutes = require("./Routes/customProducts");
+const customProductsRoutes = require("./Routes/createCustomProduct");
 
 const app = express();
 
