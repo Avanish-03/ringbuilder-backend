@@ -32,7 +32,7 @@ app.use("/api/diamonds", diamondsRoutes);
 app.use("/api/settings", settingsRoutes);
 app.use("/api/custom-products", customProductsRoutes);
 
-const PORT = process.env.PORT || 5000;
+const PORT = 5000;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}/`);
 });
