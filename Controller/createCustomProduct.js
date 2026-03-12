@@ -61,16 +61,16 @@ const createCustomProduct = async (req, res) => {
     // 3️⃣ UPDATE DEFAULT VARIANT
     // =========================
     const updateVariantMutation = `
-  mutation {
-    productVariantUpdate(input: {
-      id: "${defaultVariantId}",
-      price: "${price}"
-    }) {
-      productVariant { id price }
-      userErrors { message }
-    }
-  }
-`;
+      mutation {
+        productVariantUpdate(input: {
+          id: "${defaultVariantId}",
+          price: "${price}"
+        }) {
+          productVariant { id price }
+          userErrors { message }
+        }
+      }
+    `;
 
     const updateRes = await shopify.post("", { query: updateVariantMutation });
 
