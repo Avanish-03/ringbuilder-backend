@@ -2,6 +2,6 @@ const express = require("express");
 const router = express.Router();
 const { createCustomProduct } = require("../Controller/createCustomProduct");
 
-app.post("/api/create-custom-product", createCustomProduct);
+router.post("/", createCustomProduct);
 
 module.exports = router;
