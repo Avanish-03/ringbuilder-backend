@@ -14,7 +14,7 @@ const corsOptions = {
     "http://localhost:5173",
     "http://localhost:3000",
     "https://ringsofolight.com",
-    "https://www.ringsofolight.com",
+    "https://ringsofolight.myshopify.com",
   ],
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
