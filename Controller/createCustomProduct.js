@@ -8,20 +8,6 @@ const shopify = axios.create({
   },
 });
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const graphqlRequest = async (query, variables = {}) => {
-  const response = await shopify.post("", { query, variables });
-
-  if (response.data.errors) {
-    const error = new Error("Shopify GraphQL error");
-    error.details = response.data.errors;
-    throw error;
-  }
-
-  return response.data.data;
-};
-
 const createCustomProduct = async (req, res) => {
   try {
     const { diamondId, shopify_variant_id, price, title, image } = req.body;
@@ -33,13 +19,13 @@ const createCustomProduct = async (req, res) => {
       });
     }
 
+    // 1. Create product
     const createProductMutation = `
       mutation CreateProduct($product: ProductCreateInput!) {
         productCreate(product: $product) {
           product {
             id
             title
-            status
           }
           userErrors {
             field
@@ -49,14 +35,27 @@ const createCustomProduct = async (req, res) => {
       }
     `;
 
-    const productCreateData = await graphqlRequest(createProductMutation, {
+    const createProductVariables = {
       product: {
         title: `${title} (D:${diamondId} S:${shopify_variant_id})`,
         status: "ACTIVE",
       },
+    };
+
+    const productRes = await shopify.post("", {
+      query: createProductMutation,
+      variables: createProductVariables,
     });
 
-    const productData = productCreateData.productCreate;
+    if (productRes.data.errors) {
+      return res.status(500).json({
+        success: false,
+        step: "productCreate",
+        graphqlErrors: productRes.data.errors,
+      });
+    }
+
+    const productData = productRes.data.data.productCreate;
 
     if (productData.userErrors.length) {
       return res.status(400).json({
@@ -68,6 +67,7 @@ const createCustomProduct = async (req, res) => {
 
     const productId = productData.product.id;
 
+    // 2. Get default variant
     const variantQuery = `
       query GetProductVariant($productId: ID!) {
         product(id: $productId) {
@@ -80,18 +80,21 @@ const createCustomProduct = async (req, res) => {
       }
     `;
 
-    let defaultVariantId = null;
+    const variantRes = await shopify.post("", {
+      query: variantQuery,
+      variables: { productId },
+    });
 
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const variantData = await graphqlRequest(variantQuery, { productId });
-      defaultVariantId = variantData.product?.variants?.nodes?.[0]?.id || null;
-
-      if (defaultVariantId) {
-        break;
-      }
-
-      await sleep(800);
+    if (variantRes.data.errors) {
+      return res.status(500).json({
+        success: false,
+        step: "getDefaultVariant",
+        graphqlErrors: variantRes.data.errors,
+      });
     }
+
+    const defaultVariantId =
+      variantRes.data.data.product?.variants?.nodes?.[0]?.id;
 
     if (!defaultVariantId) {
       return res.status(500).json({
@@ -101,6 +104,7 @@ const createCustomProduct = async (req, res) => {
       });
     }
 
+    // 3. Update variant price
     const updateMutation = `
       mutation UpdateVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
         productVariantsBulkUpdate(productId: $productId, variants: $variants) {
@@ -119,7 +123,7 @@ const createCustomProduct = async (req, res) => {
       }
     `;
 
-    const updateResult = await graphqlRequest(updateMutation, {
+    const updateVariables = {
       productId,
       variants: [
         {
@@ -127,9 +131,22 @@ const createCustomProduct = async (req, res) => {
           price: String(price),
         },
       ],
+    };
+
+    const updateRes = await shopify.post("", {
+      query: updateMutation,
+      variables: updateVariables,
     });
 
-    const updateData = updateResult.productVariantsBulkUpdate;
+    if (updateRes.data.errors) {
+      return res.status(500).json({
+        success: false,
+        step: "variantUpdate",
+        graphqlErrors: updateRes.data.errors,
+      });
+    }
+
+    const updateData = updateRes.data.data.productVariantsBulkUpdate;
 
     if (updateData.userErrors.length) {
       return res.status(400).json({
@@ -139,6 +156,7 @@ const createCustomProduct = async (req, res) => {
       });
     }
 
+    // 4. Add product image
     if (image) {
       const mediaMutation = `
         mutation CreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
@@ -159,7 +177,7 @@ const createCustomProduct = async (req, res) => {
         }
       `;
 
-      const mediaResult = await graphqlRequest(mediaMutation, {
+      const mediaVariables = {
         productId,
         media: [
           {
@@ -167,9 +185,22 @@ const createCustomProduct = async (req, res) => {
             mediaContentType: "IMAGE",
           },
         ],
+      };
+
+      const mediaRes = await shopify.post("", {
+        query: mediaMutation,
+        variables: mediaVariables,
       });
 
-      const mediaData = mediaResult.productCreateMedia;
+      if (mediaRes.data.errors) {
+        return res.status(500).json({
+          success: false,
+          step: "mediaCreate",
+          graphqlErrors: mediaRes.data.errors,
+        });
+      }
+
+      const mediaData = mediaRes.data.data.productCreateMedia;
 
       if (mediaData.mediaUserErrors.length) {
         return res.status(400).json({
@@ -179,8 +210,6 @@ const createCustomProduct = async (req, res) => {
         });
       }
     }
-
-    await sleep(3000);
 
     return res.json({
       success: true,
@@ -192,7 +221,7 @@ const createCustomProduct = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "FAILED",
-      error: error.details || error.response?.data || error.message,
+      error: error.response?.data || error.message,
     });
   }
 };
