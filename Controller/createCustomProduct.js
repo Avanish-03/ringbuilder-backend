@@ -49,17 +49,12 @@ const createCustomProduct = async (req, res) => {
       }
     `;
 
-    const createProductVariables = {
+    const productCreateData = await graphqlRequest(createProductMutation, {
       product: {
         title: `${title} (D:${diamondId} S:${shopify_variant_id})`,
         status: "ACTIVE",
       },
-    };
-
-    const productCreateData = await graphqlRequest(
-      createProductMutation,
-      createProductVariables
-    );
+    });
 
     const productData = productCreateData.productCreate;
 
@@ -85,10 +80,18 @@ const createCustomProduct = async (req, res) => {
       }
     `;
 
-    const variantData = await graphqlRequest(variantQuery, { productId });
+    let defaultVariantId = null;
 
-    const defaultVariantId =
-      variantData.product?.variants?.nodes?.[0]?.id || null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const variantData = await graphqlRequest(variantQuery, { productId });
+      defaultVariantId = variantData.product?.variants?.nodes?.[0]?.id || null;
+
+      if (defaultVariantId) {
+        break;
+      }
+
+      await sleep(800);
+    }
 
     if (!defaultVariantId) {
       return res.status(500).json({
@@ -116,7 +119,7 @@ const createCustomProduct = async (req, res) => {
       }
     `;
 
-    const updateVariables = {
+    const updateResult = await graphqlRequest(updateMutation, {
       productId,
       variants: [
         {
@@ -124,9 +127,8 @@ const createCustomProduct = async (req, res) => {
           price: String(price),
         },
       ],
-    };
+    });
 
-    const updateResult = await graphqlRequest(updateMutation, updateVariables);
     const updateData = updateResult.productVariantsBulkUpdate;
 
     if (updateData.userErrors.length) {
@@ -157,7 +159,7 @@ const createCustomProduct = async (req, res) => {
         }
       `;
 
-      const mediaVariables = {
+      const mediaResult = await graphqlRequest(mediaMutation, {
         productId,
         media: [
           {
@@ -165,9 +167,8 @@ const createCustomProduct = async (req, res) => {
             mediaContentType: "IMAGE",
           },
         ],
-      };
+      });
 
-      const mediaResult = await graphqlRequest(mediaMutation, mediaVariables);
       const mediaData = mediaResult.productCreateMedia;
 
       if (mediaData.mediaUserErrors.length) {
@@ -179,72 +180,13 @@ const createCustomProduct = async (req, res) => {
       }
     }
 
-    const publicationsQuery = `
-      query GetPublications {
-        publications(first: 20) {
-          nodes {
-            id
-            name
-          }
-        }
-      }
-    `;
-
-    const publicationsData = await graphqlRequest(publicationsQuery);
-    const onlineStorePublication = publicationsData.publications?.nodes?.find((pub) =>
-      /online store/i.test(pub.name)
-    );
-
-    if (!onlineStorePublication) {
-      return res.status(500).json({
-        success: false,
-        step: "getPublication",
-        message: "Online Store publication not found",
-      });
-    }
-
-    const publishMutation = `
-      mutation PublishProduct($id: ID!, $input: [PublicationInput!]!) {
-        publishablePublish(id: $id, input: $input) {
-          publishable {
-            ... on Product {
-              id
-            }
-          }
-          shop {
-            id
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
-
-    const publishData = await graphqlRequest(publishMutation, {
-      id: productId,
-      input: [{ publicationId: onlineStorePublication.id }],
-    });
-
-    const publishResult = publishData.publishablePublish;
-
-    if (publishResult.userErrors.length) {
-      return res.status(400).json({
-        success: false,
-        step: "publishProduct",
-        userErrors: publishResult.userErrors,
-      });
-    }
-
-    await sleep(2000);
+    await sleep(3000);
 
     return res.json({
       success: true,
-      message: "Custom product created and published successfully",
+      message: "Custom product created successfully",
       productId,
       variantId: defaultVariantId,
-      publicationId: onlineStorePublication.id,
     });
   } catch (error) {
     return res.status(500).json({
