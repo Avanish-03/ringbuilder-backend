@@ -12,6 +12,7 @@ const shopify = axios.create({
 // waiting secconds and retries for variant to become available for sale after creation
 const WAIT_INTERVAL_MS = 1500;
 const WAIT_RETRIES = 15;
+const ONLINE_STORE_CATALOG_TITLE = "Online Store";
 
 // GraphQL operations
 const GQL_FIND_VARIANT_BY_SKU = `
@@ -45,9 +46,25 @@ const GQL_CREATE_PRODUCT = `
   }
 `;
 
-const GQL_PUBLISH_PRODUCT_TO_CURRENT_CHANNEL = `
-  mutation PublishProductToCurrentChannel($id: ID!) {
-    publishablePublishToCurrentChannel(id: $id) {
+const GQL_GET_PUBLICATIONS = `
+  query GetPublications {
+    publications(first: 50, catalogType: APP) {
+      nodes {
+        id
+        catalog {
+          ... on AppCatalog {
+            id
+            title
+          }
+        }
+      }
+    }
+  }
+`;
+
+const GQL_PUBLISH_PRODUCT = `
+  mutation PublishProduct($id: ID!, $input: [PublicationInput!]!) {
+    publishablePublish(id: $id, input: $input) {
       publishable {
         ... on Product {
           id
@@ -232,16 +249,34 @@ const getProductAndVariant = async (productId) => {
   return { product, variant };
 };
 
-const publishProduct = async (productId) => {
+const getOnlineStorePublicationId = async () => {
   const data = await runShopifyQuery(
-    GQL_PUBLISH_PRODUCT_TO_CURRENT_CHANNEL,
+    GQL_GET_PUBLICATIONS,
+    {},
+    "Publication lookup failed"
+  );
+
+  const publications = data?.publications?.nodes || [];
+  const onlineStorePublication = publications.find((publication) => {
+    const title = publication?.catalog?.title || "";
+    return title.toLowerCase().includes(ONLINE_STORE_CATALOG_TITLE.toLowerCase());
+  });
+
+  return ensureValue(onlineStorePublication?.id, "Online Store publication not found");
+};
+
+const publishProduct = async (productId) => {
+  const publicationId = await getOnlineStorePublicationId();
+  const data = await runShopifyQuery(
+    GQL_PUBLISH_PRODUCT,
     {
       id: productId,
+      input: [{ publicationId }],
     },
     "Product publish failed"
   );
 
-  ensureNoUserErrors(data?.publishablePublishToCurrentChannel, "Product publish user error");
+  ensureNoUserErrors(data?.publishablePublish, "Product publish user error");
 };
 
 const updateVariant = async ({ productId, variantId, price, sku }) => {
