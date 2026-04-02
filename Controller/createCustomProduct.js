@@ -141,6 +141,9 @@ const createDiamondProduct = async ({ title, price, sku, image }) => {
         variants(first: 1) {
           nodes {
             id
+            inventoryItem {
+              id
+            }
           }
         }
       }
@@ -154,9 +157,14 @@ const createDiamondProduct = async ({ title, price, sku, image }) => {
 
   ensureNoGraphqlErrors(variantRes, "Variant fetch failed");
 
+  const variantNode = variantRes?.data?.data?.product?.variants?.nodes?.[0];
   const variantId = ensureValue(
-    variantRes?.data?.data?.product?.variants?.nodes?.[0]?.id,
+    variantNode?.id,
     "Product variant was not available after product creation"
+  );
+  const inventoryItemId = ensureValue(
+    variantNode?.inventoryItem?.id,
+    "Variant inventory item was not available after product creation"
   );
 
   const updateMutation = `
@@ -181,9 +189,7 @@ const createDiamondProduct = async ({ title, price, sku, image }) => {
         {
           id: variantId,
           price: String(price),
-          sku: String(sku),
           inventoryPolicy: "CONTINUE",
-          inventoryManagement: null,
         },
       ],
     },
@@ -192,6 +198,34 @@ const createDiamondProduct = async ({ title, price, sku, image }) => {
   ensureNoGraphqlErrors(updateRes, "Variant update failed");
 
   ensureNoUserErrors(updateRes.data.data.productVariantsBulkUpdate, "Variant user error");
+
+  const inventoryItemUpdateMutation = `
+    mutation UpdateInventoryItem($input: InventoryItemUpdateInput!) {
+      inventoryItemUpdate(input: $input) {
+        inventoryItem {
+          id
+          sku
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+
+  const inventoryItemRes = await shopify.post("", {
+    query: inventoryItemUpdateMutation,
+    variables: {
+      input: {
+        id: inventoryItemId,
+        sku: String(sku),
+      },
+    },
+  });
+
+  ensureNoGraphqlErrors(inventoryItemRes, "Inventory item update failed");
+  ensureNoUserErrors(inventoryItemRes?.data?.data?.inventoryItemUpdate, "Inventory item user error");
 
   if (image) {
     const mediaMutation = `
