@@ -33,5 +33,6 @@ app.use("/api/custom-products", customProductsRoutes);
 app.use("/api/create-custom-product", customProductsRoutes);
 app.use("/api/createCustomProduct", customProductsRoutes);
 app.use("/api/create-diamond-and-return-variant", customProductsRoutes);
+app.use("/api/createDiamondAndReturnVariant", customProductsRoutes);
 
 module.exports = app;
