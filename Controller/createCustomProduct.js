@@ -12,6 +12,7 @@ const shopify = axios.create({
 // waiting secconds and retries for variant to become available for sale after creation
 const WAIT_INTERVAL_MS = 1500;
 const WAIT_RETRIES = 15;
+
 // GraphQL operations
 const GQL_FIND_VARIANT_BY_SKU = `
   query FindVariantBySku($query: String!) {
