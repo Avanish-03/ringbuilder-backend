@@ -44,6 +44,28 @@ const GQL_CREATE_PRODUCT = `
   }
 `;
 
+const GQL_GET_PUBLICATIONS = `
+  query GetPublications {
+    publications(first: 50) {
+      nodes {
+        id
+        autoPublish
+      }
+    }
+  }
+`;
+
+const GQL_PUBLISH_PRODUCT = `
+  mutation PublishProduct($id: ID!, $input: [PublicationInput!]!) {
+    publishablePublish(id: $id, input: $input) {
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
 const GQL_GET_PRODUCT_VARIANT = `
   query GetProductVariant($productId: ID!) {
     product(id: $productId) {
@@ -215,6 +237,35 @@ const getProductAndVariant = async (productId) => {
   return { product, variant };
 };
 
+const publishProduct = async (productId) => {
+  const publicationData = await runShopifyQuery(
+    GQL_GET_PUBLICATIONS,
+    {},
+    "Publication lookup failed"
+  );
+
+  const publications = publicationData?.publications?.nodes || [];
+  if (!publications.length) {
+    throw createStepError({
+      message: "No Shopify publications found for this store",
+      statusCode: 500,
+    });
+  }
+
+  const data = await runShopifyQuery(
+    GQL_PUBLISH_PRODUCT,
+    {
+      id: productId,
+      input: publications.map((publication) => ({
+        publicationId: publication.id,
+      })),
+    },
+    "Product publish failed"
+  );
+
+  ensureNoUserErrors(data?.publishablePublish, "Product publish user error");
+};
+
 const updateVariant = async ({ productId, variantId, price, sku }) => {
   const data = await runShopifyQuery(
     GQL_UPDATE_VARIANT,
@@ -283,6 +334,7 @@ const createDiamondProduct = async ({ diamond, sku, price }) => {
   const title = buildDiamondTitle(diamond, sku);
 
   const productId = await createProduct(title, sku);
+  await publishProduct(productId);
   const { product, variant } = await getProductAndVariant(productId);
 
   const updatedVariant = await updateVariant({
