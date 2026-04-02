@@ -290,13 +290,15 @@ const createDiamondAndReturnVariant = async (req, res) => {
       productId: created.productId,
     });
   } catch (error) {
+    const responseStatus = error.response?.status;
     const responseData = error.response?.data;
 
-    return res.status(error.statusCode || 500).json({
+    return res.status(error.statusCode || responseStatus || 500).json({
       success: false,
       message: responseData?.errors?.[0]?.message || error.message,
       graphqlErrors: error.graphqlErrors || responseData?.errors,
       userErrors: error.userErrors,
+      upstreamStatus: responseStatus,
     });
   }
 };

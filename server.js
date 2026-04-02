@@ -30,5 +30,7 @@ app.get("/", (req, res) => {
 app.use("/api/diamonds", diamondsRoutes);
 app.use("/api/settings", settingsRoutes);
 app.use("/api/custom-products", customProductsRoutes);
+app.use("/api/create-custom-product", customProductsRoutes);
+app.use("/api/createCustomProduct", customProductsRoutes);
 
 module.exports = app;
