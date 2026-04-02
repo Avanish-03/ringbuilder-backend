@@ -311,7 +311,7 @@ const createDiamondProduct = async ({ diamond, sku, price }) => {
   const title = buildDiamondTitle(diamond, sku);
 
   const productId = await createProduct(title, sku);
-  await publishProduct(productId);
+  // await publishProduct(productId);
   const { product, variant } = await getProductAndVariant(productId);
 
   const updatedVariant = await updateVariant({
