@@ -200,8 +200,8 @@ const createDiamondProduct = async ({ title, price, sku, image }) => {
   ensureNoUserErrors(updateRes.data.data.productVariantsBulkUpdate, "Variant user error");
 
   const inventoryItemUpdateMutation = `
-    mutation UpdateInventoryItem($input: InventoryItemUpdateInput!) {
-      inventoryItemUpdate(input: $input) {
+    mutation UpdateInventoryItem($id: ID!, $input: InventoryItemInput!) {
+      inventoryItemUpdate(id: $id, input: $input) {
         inventoryItem {
           id
           sku
@@ -217,8 +217,8 @@ const createDiamondProduct = async ({ title, price, sku, image }) => {
   const inventoryItemRes = await shopify.post("", {
     query: inventoryItemUpdateMutation,
     variables: {
+      id: inventoryItemId,
       input: {
-        id: inventoryItemId,
         sku: String(sku),
       },
     },
