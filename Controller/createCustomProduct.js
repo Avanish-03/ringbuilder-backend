@@ -1,5 +1,6 @@
 const axios = require("axios");
 
+// Shopify client
 const shopify = axios.create({
   baseURL: `https://${process.env.SHOPIFY_STORE}/admin/api/${process.env.SHOPIFY_API_VERSION}/graphql.json`,
   headers: {
@@ -8,10 +9,111 @@ const shopify = axios.create({
   },
 });
 
+const WAIT_INTERVAL_MS = 1500;
+const WAIT_RETRIES = 15;
+
+// GraphQL operations
+const GQL_FIND_VARIANT_BY_SKU = `
+  query FindVariantBySku($query: String!) {
+    productVariants(first: 1, query: $query) {
+      nodes {
+        id
+        legacyResourceId
+        sku
+        product {
+          id
+          legacyResourceId
+          handle
+        }
+      }
+    }
+  }
+`;
+
+const GQL_CREATE_PRODUCT = `
+  mutation CreateProduct($product: ProductCreateInput!) {
+    productCreate(product: $product) {
+      product {
+        id
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+const GQL_GET_PRODUCT_VARIANT = `
+  query GetProductVariant($productId: ID!) {
+    product(id: $productId) {
+      id
+      handle
+      legacyResourceId
+      variants(first: 1) {
+        nodes {
+          id
+          legacyResourceId
+          availableForSale
+        }
+      }
+    }
+  }
+`;
+
+const GQL_UPDATE_VARIANT = `
+  mutation UpdateVariant($productId: ID!, $variantId: ID!, $price: Money!, $sku: String!) {
+    productVariantsBulkUpdate(
+      productId: $productId
+      variants: [{
+        id: $variantId
+        price: $price
+        inventoryPolicy: CONTINUE
+        inventoryItem: { tracked: false, sku: $sku }
+      }]
+    ) {
+      productVariants {
+        id
+        legacyResourceId
+        availableForSale
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+const GQL_CREATE_MEDIA = `
+  mutation CreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+    productCreateMedia(productId: $productId, media: $media) {
+      media {
+        status
+      }
+      mediaUserErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+const GQL_CHECK_VARIANT = `
+  query CheckVariant($id: ID!) {
+    node(id: $id) {
+      ... on ProductVariant {
+        id
+        legacyResourceId
+        availableForSale
+      }
+    }
+  }
+`;
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const getGraphqlErrors = (response) => response?.data?.errors || null;
-
+// Shared helpers
 const createStepError = ({ message, statusCode = 500, graphqlErrors, userErrors }) => {
   const error = new Error(message);
   error.statusCode = statusCode;
@@ -20,9 +122,11 @@ const createStepError = ({ message, statusCode = 500, graphqlErrors, userErrors 
   return error;
 };
 
+const getGraphqlErrors = (response) => response?.data?.errors || null;
+
 const ensureNoGraphqlErrors = (response, message) => {
   const graphqlErrors = getGraphqlErrors(response);
-  if (graphqlErrors) {
+  if (graphqlErrors?.length) {
     throw createStepError({ message, graphqlErrors });
   }
 };
@@ -34,90 +138,51 @@ const ensureNoUserErrors = (payload, message) => {
   }
 };
 
-const ensureValue = (value, message, extra = {}) => {
+const ensureValue = (value, message) => {
   if (value === undefined || value === null) {
-    throw createStepError({ message, ...extra });
+    throw createStepError({ message });
   }
   return value;
 };
 
+const runShopifyQuery = async (query, variables, errorMessage) => {
+  const response = await shopify.post("", { query, variables });
+  ensureNoGraphqlErrors(response, errorMessage);
+  return response.data.data;
+};
+
+const buildDiamondTitle = (diamond, sku) => {
+  const parts = [diamond.carat, diamond.shape, diamond.color, diamond.clarity]
+    .filter((value) => value !== undefined && value !== null && String(value).trim() !== "")
+    .map((value, index) => (index === 0 ? `${value}CT` : String(value).trim()));
+
+  return parts.join(" ") || `Diamond ${sku}`;
+};
+
+const formatVariantResponse = ({ variant, product }) => ({
+  success: true,
+  variantId: variant?.legacyResourceId ? String(variant.legacyResourceId) : variant?.id,
+  adminVariantId: variant?.id || null,
+  productId: product?.legacyResourceId ? String(product.legacyResourceId) : product?.id,
+  adminProductId: product?.id || null,
+  storefrontProductId: product?.legacyResourceId ? String(product.legacyResourceId) : null,
+  handle: product?.handle || null,
+});
+
 const findVariantBySKU = async (sku) => {
-  const query = `
-    query getProductBySKU($query: String!) {
-      productVariants(first: 1, query: $query) {
-        nodes {
-          id
-          sku
-          product {
-            id
-            handle
-          }
-        }
-      }
-    }
-  `;
+  const data = await runShopifyQuery(
+    GQL_FIND_VARIANT_BY_SKU,
+    { query: `sku:${sku}` },
+    "SKU lookup failed"
+  );
 
-  const res = await shopify.post("", {
-    query,
-    variables: { query: `sku:${sku}` },
-  });
-
-  ensureNoGraphqlErrors(res, "SKU lookup failed");
-
-  const node = res?.data?.data?.productVariants?.nodes?.[0];
-  return node || null;
+  return data?.productVariants?.nodes?.[0] || null;
 };
 
-const waitForVariant = async (variantId) => {
-  const query = `
-    query getVariant($id: ID!) {
-      node(id: $id) {
-        ... on ProductVariant {
-          id
-          availableForSale
-        }
-      }
-    }
-  `;
-
-  for (let i = 0; i < 15; i++) {
-    const res = await shopify.post("", {
-      query,
-      variables: { id: variantId },
-    });
-
-    ensureNoGraphqlErrors(res, "Variant fetch failed");
-
-    const node = res.data.data.node;
-
-    if (node?.id === variantId && node.availableForSale) {
-      return true;
-    }
-
-    await sleep(1500);
-  }
-
-  return false;
-};
-
-const createDiamondProduct = async ({ title, price, sku, image }) => {
-  const createProductMutation = `
-    mutation CreateProduct($product: ProductCreateInput!) {
-      productCreate(product: $product) {
-        product {
-          id
-        }
-        userErrors {
-          field
-          message
-        }
-      }
-    }
-  `;
-
-  const createRes = await shopify.post("", {
-    query: createProductMutation,
-    variables: {
+const createProduct = async (title, sku) => {
+  const data = await runShopifyQuery(
+    GQL_CREATE_PRODUCT,
+    {
       product: {
         title,
         vendor: "Custom Diamonds",
@@ -126,154 +191,122 @@ const createDiamondProduct = async ({ title, price, sku, image }) => {
         status: "ACTIVE",
       },
     },
-  });
-
-  ensureNoGraphqlErrors(createRes, "Product create failed");
-
-  const productData = createRes.data.data.productCreate;
-  ensureNoUserErrors(productData, "Product user error");
-
-  const productId = ensureValue(productData?.product?.id, "Product was created without an id");
-
-  const variantQuery = `
-    query GetVariant($productId: ID!) {
-      product(id: $productId) {
-        variants(first: 1) {
-          nodes {
-            id
-            inventoryItem {
-              id
-            }
-          }
-        }
-      }
-    }
-  `;
-
-  const variantRes = await shopify.post("", {
-    query: variantQuery,
-    variables: { productId },
-  });
-
-  ensureNoGraphqlErrors(variantRes, "Variant fetch failed");
-
-  const variantNode = variantRes?.data?.data?.product?.variants?.nodes?.[0];
-  const variantId = ensureValue(
-    variantNode?.id,
-    "Product variant was not available after product creation"
-  );
-  const inventoryItemId = ensureValue(
-    variantNode?.inventoryItem?.id,
-    "Variant inventory item was not available after product creation"
+    "Product create failed"
   );
 
-  const updateMutation = `
-    mutation UpdateVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-        productVariants {
-          id
-        }
-        userErrors {
-          field
-          message
-        }
-      }
-    }
-  `;
+  ensureNoUserErrors(data?.productCreate, "Product user error");
 
-  const updateRes = await shopify.post("", {
-    query: updateMutation,
-    variables: {
+  return ensureValue(data?.productCreate?.product?.id, "Product was created without an id");
+};
+
+const getProductAndVariant = async (productId) => {
+  const data = await runShopifyQuery(
+    GQL_GET_PRODUCT_VARIANT,
+    { productId },
+    "Variant fetch failed"
+  );
+
+  const product = data?.product;
+  const variant = product?.variants?.nodes?.[0];
+
+  ensureValue(product?.id, "Product fetch failed after creation");
+  ensureValue(variant?.id, "Product variant was not available after product creation");
+
+  return { product, variant };
+};
+
+const updateVariant = async ({ productId, variantId, price, sku }) => {
+  const data = await runShopifyQuery(
+    GQL_UPDATE_VARIANT,
+    {
       productId,
-      variants: [
+      variantId,
+      price: String(price),
+      sku: String(sku),
+    },
+    "Variant update failed"
+  );
+
+  ensureNoUserErrors(data?.productVariantsBulkUpdate, "Variant user error");
+
+  return data?.productVariantsBulkUpdate?.productVariants?.[0] || null;
+};
+
+const attachProductImage = async (productId, image) => {
+  if (!image) {
+    return;
+  }
+
+  const data = await runShopifyQuery(
+    GQL_CREATE_MEDIA,
+    {
+      productId,
+      media: [
         {
-          id: variantId,
-          price: String(price),
-          inventoryPolicy: "CONTINUE",
+          originalSource: image,
+          mediaContentType: "IMAGE",
         },
       ],
     },
-  });
+    "Media error"
+  );
 
-  ensureNoGraphqlErrors(updateRes, "Variant update failed");
-
-  ensureNoUserErrors(updateRes.data.data.productVariantsBulkUpdate, "Variant user error");
-
-  const inventoryItemUpdateMutation = `
-    mutation UpdateInventoryItem($id: ID!, $input: InventoryItemInput!) {
-      inventoryItemUpdate(id: $id, input: $input) {
-        inventoryItem {
-          id
-          sku
-        }
-        userErrors {
-          field
-          message
-        }
-      }
-    }
-  `;
-
-  const inventoryItemRes = await shopify.post("", {
-    query: inventoryItemUpdateMutation,
-    variables: {
-      id: inventoryItemId,
-      input: {
-        sku: String(sku),
-      },
-    },
-  });
-
-  ensureNoGraphqlErrors(inventoryItemRes, "Inventory item update failed");
-  ensureNoUserErrors(inventoryItemRes?.data?.data?.inventoryItemUpdate, "Inventory item user error");
-
-  if (image) {
-    const mediaMutation = `
-      mutation CreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
-        productCreateMedia(productId: $productId, media: $media) {
-          media {
-            status
-          }
-          mediaUserErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
-
-    const mediaRes = await shopify.post("", {
-      query: mediaMutation,
-      variables: {
-        productId,
-        media: [
-          {
-            originalSource: image,
-            mediaContentType: "IMAGE",
-          },
-        ],
-      },
-    });
-
-    ensureNoGraphqlErrors(mediaRes, "Media error");
-
-    const mediaErrors = mediaRes?.data?.data?.productCreateMedia?.mediaUserErrors || [];
-    if (mediaErrors.length) {
-      throw createStepError({ message: "Media user error", userErrors: mediaErrors });
-    }
+  const mediaErrors = data?.productCreateMedia?.mediaUserErrors || [];
+  if (mediaErrors.length) {
+    throw createStepError({ message: "Media user error", userErrors: mediaErrors, statusCode: 400 });
   }
-
-  const variantReady = await waitForVariant(variantId);
-  if (!variantReady) {
-    throw createStepError({
-      message: "Variant was created but did not become available for sale in time",
-      statusCode: 502,
-    });
-  }
-
-  return { productId, variantId };
 };
 
+const waitForVariantToBeReady = async (variantId) => {
+  for (let i = 0; i < WAIT_RETRIES; i += 1) {
+    const data = await runShopifyQuery(
+      GQL_CHECK_VARIANT,
+      { id: variantId },
+      "Variant fetch failed"
+    );
+
+    const variant = data?.node;
+    if (variant?.id === variantId && variant.availableForSale) {
+      return variant;
+    }
+
+    await sleep(WAIT_INTERVAL_MS);
+  }
+
+  throw createStepError({
+    message: "Variant was created but did not become available for sale in time",
+    statusCode: 502,
+  });
+};
+
+const createDiamondProduct = async ({ diamond, sku, price }) => {
+  const title = buildDiamondTitle(diamond, sku);
+
+  const productId = await createProduct(title, sku);
+  const { product, variant } = await getProductAndVariant(productId);
+
+  const updatedVariant = await updateVariant({
+    productId,
+    variantId: variant.id,
+    price,
+    sku,
+  });
+
+  await attachProductImage(productId, diamond.image);
+
+  const readyVariant = await waitForVariantToBeReady(variant.id);
+
+  return formatVariantResponse({
+    variant: {
+      ...variant,
+      ...updatedVariant,
+      ...readyVariant,
+    },
+    product,
+  });
+};
+
+// API handler
 const createDiamondAndReturnVariant = async (req, res) => {
   try {
     const { diamond } = req.body;
@@ -295,34 +328,20 @@ const createDiamondAndReturnVariant = async (req, res) => {
       });
     }
 
-    const existing = await findVariantBySKU(sku);
+    const existingVariant = await findVariantBySKU(sku);
 
-    if (existing) {
-      return res.json({
-        success: true,
-        variantId: existing.id,
-        productId: existing.product.id,
-        handle: existing.product.handle,
-      });
+    if (existingVariant) {
+      return res.json(
+        formatVariantResponse({
+          variant: existingVariant,
+          product: existingVariant.product,
+        })
+      );
     }
 
-    const titleParts = [diamond.carat, diamond.shape, diamond.color, diamond.clarity]
-      .filter((value) => value !== undefined && value !== null && String(value).trim() !== "")
-      .map((value, index) => (index === 0 ? `${value}CT` : String(value).trim()));
-    const title = titleParts.join(" ") || `Diamond ${sku}`;
+    const result = await createDiamondProduct({ diamond, sku, price });
 
-    const created = await createDiamondProduct({
-      title,
-      price,
-      sku,
-      image: diamond.image,
-    });
-
-    return res.json({
-      success: true,
-      variantId: created.variantId,
-      productId: created.productId,
-    });
+    return res.json(result);
   } catch (error) {
     const responseStatus = error.response?.status;
     const responseData = error.response?.data;
