@@ -8,121 +8,46 @@ const shopify = axios.create({
   },
 });
 
-const storefront = process.env.SHOPIFY_STOREFRONT_TOKEN
-  ? axios.create({
-      baseURL: `https://${process.env.SHOPIFY_STORE}/api/${
-        process.env.SHOPIFY_STOREFRONT_API_VERSION ||
-        process.env.SHOPIFY_API_VERSION
-      }/graphql.json`,
-      headers: {
-        "X-Shopify-Storefront-Access-Token":
-          process.env.SHOPIFY_STOREFRONT_TOKEN,
-        "Content-Type": "application/json",
-      },
-    })
-  : null;
-
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const createStepError = ({
-  step,
-  message,
-  statusCode = 500,
-  graphqlErrors,
-  userErrors,
-  errorCode,
-}) => {
-  const error = new Error(message);
-  error.step = step;
-  error.statusCode = statusCode;
-  error.graphqlErrors = graphqlErrors;
-  error.userErrors = userErrors;
-  error.errorCode = errorCode;
-  return error;
-};
 
 const getGraphqlErrors = (response) => response?.data?.errors || null;
 
-const describeGraphqlErrors = (graphqlErrors, fallbackMessage) => {
-  if (!graphqlErrors?.length) {
-    return fallbackMessage;
-  }
-
-  const missingAccess = graphqlErrors
-    .map((error) => error.extensions?.requiredAccess)
-    .filter(Boolean);
-
-  if (missingAccess.length) {
-    return `Shopify app access is missing ${missingAccess.join(
-      ", "
-    )}. Reinstall or update the app scopes, then retry.`;
-  }
-
-  return graphqlErrors.map((error) => error.message).join("; ") || fallbackMessage;
+const createStepError = ({ message, statusCode = 500, graphqlErrors, userErrors }) => {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  error.graphqlErrors = graphqlErrors;
+  error.userErrors = userErrors;
+  return error;
 };
 
-const getAccessDeniedErrorCode = (graphqlErrors) => {
-  const requiredAccess = graphqlErrors
-    .map((error) => error.extensions?.requiredAccess || "")
-    .join(" ");
-
-  if (requiredAccess.includes("write_publications")) {
-    return "SHOPIFY_WRITE_PUBLICATIONS_REQUIRED";
-  }
-
-  if (requiredAccess.includes("read_publications")) {
-    return "SHOPIFY_READ_PUBLICATIONS_REQUIRED";
-  }
-
-  return "SHOPIFY_ACCESS_DENIED";
-};
-
-const ensureNoGraphqlErrors = (response, step, message) => {
+const ensureNoGraphqlErrors = (response, message) => {
   const graphqlErrors = getGraphqlErrors(response);
-
   if (graphqlErrors) {
-    const isAccessDenied = graphqlErrors.some(
-      (error) => error.extensions?.code === "ACCESS_DENIED"
-    );
-
-    throw createStepError({
-      step,
-      message: describeGraphqlErrors(graphqlErrors, message),
-      statusCode: isAccessDenied ? 403 : 500,
-      graphqlErrors,
-      errorCode: isAccessDenied
-        ? getAccessDeniedErrorCode(graphqlErrors)
-        : "SHOPIFY_GRAPHQL_ERROR",
-    });
+    throw createStepError({ message, graphqlErrors });
   }
 };
 
-const ensureNoUserErrors = (payload, step, message) => {
-  const userErrors = payload?.userErrors || payload?.mediaUserErrors || [];
-
+const ensureNoUserErrors = (payload, message) => {
+  const userErrors = payload?.userErrors || [];
   if (userErrors.length) {
-    throw createStepError({
-      step,
-      message,
-      statusCode: 400,
-      userErrors,
-    });
+    throw createStepError({ message, userErrors, statusCode: 400 });
   }
 };
 
-const waitForStorefrontVariantAvailability = async (variantId) => {
-  if (!storefront) {
-    // If no storefront token, just wait a few seconds
-    await sleep(5000);
-    return { storefrontVerified: false };
+const ensureValue = (value, message, extra = {}) => {
+  if (value === undefined || value === null) {
+    throw createStepError({ message, ...extra });
   }
+  return value;
+};
 
-  const storefrontVariantQuery = `
-    query StorefrontVariant($id: ID!) {
-      node(id: $id) {
-        ... on ProductVariant {
+const findVariantBySKU = async (sku) => {
+  const query = `
+    query getProductBySKU($query: String!) {
+      productVariants(first: 1, query: $query) {
+        nodes {
           id
-          availableForSale
+          sku
           product {
             id
             handle
@@ -132,138 +57,150 @@ const waitForStorefrontVariantAvailability = async (variantId) => {
     }
   `;
 
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const storefrontRes = await storefront.post("", {
-      query: storefrontVariantQuery,
+  const res = await shopify.post("", {
+    query,
+    variables: { query: `sku:${sku}` },
+  });
+
+  ensureNoGraphqlErrors(res, "SKU lookup failed");
+
+  const node = res?.data?.data?.productVariants?.nodes?.[0];
+  return node || null;
+};
+
+const waitForVariant = async (variantId) => {
+  const query = `
+    query getVariant($id: ID!) {
+      node(id: $id) {
+        ... on ProductVariant {
+          id
+          availableForSale
+        }
+      }
+    }
+  `;
+
+  for (let i = 0; i < 15; i++) {
+    const res = await shopify.post("", {
+      query,
       variables: { id: variantId },
     });
 
-    const graphqlErrors = getGraphqlErrors(storefrontRes);
+    ensureNoGraphqlErrors(res, "Variant fetch failed");
 
-    if (graphqlErrors) {
-      throw createStepError({
-        step: "verifyStorefrontAvailability",
-        message: describeGraphqlErrors(
-          graphqlErrors,
-          "Unable to verify storefront availability for the custom variant"
-        ),
-        statusCode: 500,
-        graphqlErrors,
-        errorCode: "SHOPIFY_STOREFRONT_GRAPHQL_ERROR",
-      });
+    const node = res.data.data.node;
+
+    if (node?.id === variantId && node.availableForSale) {
+      return true;
     }
 
-    const variantNode = storefrontRes.data.data?.node;
-
-    if (variantNode?.id === variantId && variantNode.availableForSale) {
-      // Wait a tiny bit more to ensure AJAX cart works
-      await sleep(1000);
-      return {
-        storefrontVerified: true,
-        storefrontProductHandle: variantNode.product?.handle || null,
-      };
-    }
-
-    // Wait 2 seconds before retry
-    await sleep(2000);
+    await sleep(1500);
   }
 
-  throw createStepError({
-    step: "verifyStorefrontAvailability",
-    statusCode: 504,
-    errorCode: "SHOPIFY_STOREFRONT_PROPAGATION_TIMEOUT",
-    message:
-      "Product variant was created but storefront availability did not propagate in time. Try again after a few seconds.",
-  });
+  return false;
 };
 
-const createCustomProduct = async (req, res) => {
-  try {
-    const { diamondId, shopify_variant_id, price, title, image } = req.body;
-
-    if (!diamondId || !shopify_variant_id || !price || !title) {
-      return res.status(400).json({
-        success: false,
-        message: "diamondId, shopify_variant_id, price, and title are required",
-      });
-    }
-
-    const createProductMutation = `
-      mutation CreateProduct($product: ProductCreateInput!) {
-        productCreate(product: $product) {
-          product {
-            id
-            title
-          }
-          userErrors {
-            field
-            message
-          }
+const createDiamondProduct = async ({ title, price, sku, image }) => {
+  const createProductMutation = `
+    mutation CreateProduct($product: ProductCreateInput!) {
+      productCreate(product: $product) {
+        product {
+          id
+        }
+        userErrors {
+          field
+          message
         }
       }
-    `;
+    }
+  `;
 
-    const createProductVariables = {
+  const createRes = await shopify.post("", {
+    query: createProductMutation,
+    variables: {
       product: {
-        title: `${title} (D:${diamondId} S:${shopify_variant_id})`,
+        title,
+        vendor: "Custom Diamonds",
+        productType: "Diamond",
+        tags: ["diamond", `sku:${sku}`],
         status: "ACTIVE",
       },
-    };
+    },
+  });
 
-    const productRes = await shopify.post("", {
-      query: createProductMutation,
-      variables: createProductVariables,
-    });
+  ensureNoGraphqlErrors(createRes, "Product create failed");
 
-    ensureNoGraphqlErrors(productRes, "productCreate", "Unable to create custom product");
+  const productData = createRes.data.data.productCreate;
+  ensureNoUserErrors(productData, "Product user error");
 
-    const productData = productRes.data.data.productCreate;
-    ensureNoUserErrors(productData, "productCreate", "Shopify rejected the custom product request");
+  const productId = ensureValue(productData?.product?.id, "Product was created without an id");
 
-    const productId = productData.product.id;
-
-    const variantQuery = `
-      query GetProductVariant($productId: ID!) {
-        product(id: $productId) {
-          variants(first: 1) {
-            nodes {
-              id
-              legacyResourceId
-            }
+  const variantQuery = `
+    query GetVariant($productId: ID!) {
+      product(id: $productId) {
+        variants(first: 1) {
+          nodes {
+            id
           }
         }
       }
-    `;
-
-    const variantRes = await shopify.post("", {
-      query: variantQuery,
-      variables: { productId },
-    });
-
-    ensureNoGraphqlErrors(variantRes, "getDefaultVariant", "Unable to fetch the default variant for the custom product");
-
-    const defaultVariant = variantRes.data.data?.product?.variants?.nodes?.[0] || null;
-    const defaultVariantId = defaultVariant?.id;
-    const defaultVariantLegacyId = defaultVariant?.legacyResourceId;
-
-    if (!defaultVariantId) {
-      throw createStepError({
-        step: "getDefaultVariant",
-        message: "Default variant not found for created product",
-      });
     }
+  `;
 
-    const updateMutation = `
-      mutation UpdateVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-        productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-          product {
-            id
+  const variantRes = await shopify.post("", {
+    query: variantQuery,
+    variables: { productId },
+  });
+
+  ensureNoGraphqlErrors(variantRes, "Variant fetch failed");
+
+  const variantId = ensureValue(
+    variantRes?.data?.data?.product?.variants?.nodes?.[0]?.id,
+    "Product variant was not available after product creation"
+  );
+
+  const updateMutation = `
+    mutation UpdateVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+        productVariants {
+          id
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+
+  const updateRes = await shopify.post("", {
+    query: updateMutation,
+    variables: {
+      productId,
+      variants: [
+        {
+          id: variantId,
+          price: String(price),
+          sku: String(sku),
+          inventoryPolicy: "CONTINUE",
+          inventoryManagement: null,
+        },
+      ],
+    },
+  });
+
+  ensureNoGraphqlErrors(updateRes, "Variant update failed");
+
+  ensureNoUserErrors(updateRes.data.data.productVariantsBulkUpdate, "Variant user error");
+
+  if (image) {
+    const mediaMutation = `
+      mutation CreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+        productCreateMedia(productId: $productId, media: $media) {
+          media {
+            status
           }
-          productVariants {
-            id
-            price
-          }
-          userErrors {
+          mediaUserErrors {
             field
             message
           }
@@ -271,88 +208,97 @@ const createCustomProduct = async (req, res) => {
       }
     `;
 
-    const updateRes = await shopify.post("", {
-      query: updateMutation,
+    const mediaRes = await shopify.post("", {
+      query: mediaMutation,
       variables: {
         productId,
-        variants: [
+        media: [
           {
-            id: defaultVariantId,
-            price: String(price),
-            inventoryPolicy: "CONTINUE",
+            originalSource: image,
+            mediaContentType: "IMAGE",
           },
         ],
       },
     });
 
-    ensureNoGraphqlErrors(updateRes, "variantUpdate", "Unable to update the custom product variant");
+    ensureNoGraphqlErrors(mediaRes, "Media error");
 
-    ensureNoUserErrors(updateRes.data.data?.productVariantsBulkUpdate, "variantUpdate", "Shopify rejected the custom variant update");
-
-    // ✅ Removed publish step to avoid write_publications error
-    // await publishProductToCurrentChannel(productId);
-
-    const storefrontAvailability = await waitForStorefrontVariantAvailability(defaultVariantId);
-
-    if (image) {
-      const mediaMutation = `
-        mutation CreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
-          productCreateMedia(productId: $productId, media: $media) {
-            media {
-              alt
-              mediaContentType
-              status
-            }
-            mediaUserErrors {
-              field
-              message
-            }
-            product {
-              id
-            }
-          }
-        }
-      `;
-
-      const mediaRes = await shopify.post("", {
-        query: mediaMutation,
-        variables: {
-          productId,
-          media: [
-            {
-              originalSource: image,
-              mediaContentType: "IMAGE",
-            },
-          ],
-        },
-      });
-
-      ensureNoGraphqlErrors(mediaRes, "mediaCreate", "Unable to attach media to the custom product");
-
-      ensureNoUserErrors(mediaRes.data.data?.productCreateMedia, "mediaCreate", "Shopify rejected the custom product media");
+    const mediaErrors = mediaRes?.data?.data?.productCreateMedia?.mediaUserErrors || [];
+    if (mediaErrors.length) {
+      throw createStepError({ message: "Media user error", userErrors: mediaErrors });
     }
+  }
+
+  const variantReady = await waitForVariant(variantId);
+  if (!variantReady) {
+    throw createStepError({
+      message: "Variant was created but did not become available for sale in time",
+      statusCode: 502,
+    });
+  }
+
+  return { productId, variantId };
+};
+
+const createDiamondAndReturnVariant = async (req, res) => {
+  try {
+    const { diamond } = req.body;
+
+    if (!diamond || diamond.id === undefined || diamond.id === null || diamond.price === undefined || diamond.price === null) {
+      return res.status(400).json({
+        success: false,
+        message: "diamond.id and diamond.price are required",
+      });
+    }
+
+    const sku = String(diamond.id);
+    const price = Number(diamond.price);
+
+    if (!Number.isFinite(price) || price < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "diamond.price must be a valid non-negative number",
+      });
+    }
+
+    const existing = await findVariantBySKU(sku);
+
+    if (existing) {
+      return res.json({
+        success: true,
+        variantId: existing.id,
+        productId: existing.product.id,
+        handle: existing.product.handle,
+      });
+    }
+
+    const titleParts = [diamond.carat, diamond.shape, diamond.color, diamond.clarity]
+      .filter((value) => value !== undefined && value !== null && String(value).trim() !== "")
+      .map((value, index) => (index === 0 ? `${value}CT` : String(value).trim()));
+    const title = titleParts.join(" ") || `Diamond ${sku}`;
+
+    const created = await createDiamondProduct({
+      title,
+      price,
+      sku,
+      image: diamond.image,
+    });
 
     return res.json({
       success: true,
-      message: "Custom product created successfully",
-      productId,
-      variantId: defaultVariantId,
-      variantLegacyId: defaultVariantLegacyId,
-      publishedToCurrentChannel: false,
-      storefrontVerified: storefrontAvailability.storefrontVerified,
-      storefrontProductHandle: storefrontAvailability.storefrontProductHandle,
+      variantId: created.variantId,
+      productId: created.productId,
     });
   } catch (error) {
+    const responseData = error.response?.data;
+
     return res.status(error.statusCode || 500).json({
       success: false,
-      step: error.step,
-      code: error.errorCode || "CUSTOM_PRODUCT_CREATE_FAILED",
-      message: error.message || "FAILED",
+      message: responseData?.errors?.[0]?.message || error.message,
+      graphqlErrors: error.graphqlErrors || responseData?.errors,
       userErrors: error.userErrors,
-      graphqlErrors: error.graphqlErrors,
-      error: error.response?.data || error.message,
     });
   }
 };
 
-module.exports = { createCustomProduct };
+module.exports = { createDiamondAndReturnVariant };

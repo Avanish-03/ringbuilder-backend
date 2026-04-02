@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
-const { createCustomProduct } = require("../Controller/createCustomProduct");
+const { createDiamondAndReturnVariant } = require("../Controller/createCustomProduct");
 
-router.post("/", createCustomProduct);
+router.post("/", createDiamondAndReturnVariant);
 
 module.exports = router;
