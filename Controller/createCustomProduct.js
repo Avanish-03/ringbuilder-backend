@@ -9,8 +9,10 @@ const shopify = axios.create({
   },
 });
 
+// waiting secconds and retries for variant to become available for sale after creation
 const WAIT_INTERVAL_MS = 1500;
 const WAIT_RETRIES = 15;
+const ONLINE_STORE_CATALOG_TITLE = "Online Store";
 
 // GraphQL operations
 const GQL_FIND_VARIANT_BY_SKU = `
@@ -46,10 +48,17 @@ const GQL_CREATE_PRODUCT = `
 
 const GQL_GET_PUBLICATIONS = `
   query GetPublications {
-    publications(first: 50) {
+    publications(first: 50, catalogType: APP) {
       nodes {
         id
         autoPublish
+        supportsFuturePublishing
+        catalog {
+          ... on AppCatalog {
+            id
+            title
+          }
+        }
       }
     }
   }
@@ -237,28 +246,45 @@ const getProductAndVariant = async (productId) => {
   return { product, variant };
 };
 
-const publishProduct = async (productId) => {
-  const publicationData = await runShopifyQuery(
+const getOnlineStorePublicationId = async () => {
+  const data = await runShopifyQuery(
     GQL_GET_PUBLICATIONS,
     {},
     "Publication lookup failed"
   );
 
-  const publications = publicationData?.publications?.nodes || [];
+  const publications = data?.publications?.nodes || [];
+
   if (!publications.length) {
     throw createStepError({
-      message: "No Shopify publications found for this store",
+      message: "No app publications found for this store",
       statusCode: 500,
     });
   }
+
+  const onlineStorePublication = publications.find((publication) => {
+    const title = publication?.catalog?.title || "";
+    return title.toLowerCase().includes(ONLINE_STORE_CATALOG_TITLE.toLowerCase());
+  });
+
+  if (!onlineStorePublication?.id) {
+    throw createStepError({
+      message: "Online Store publication not found",
+      statusCode: 500,
+    });
+  }
+
+  return onlineStorePublication.id;
+};
+
+const publishProduct = async (productId) => {
+  const publicationId = await getOnlineStorePublicationId();
 
   const data = await runShopifyQuery(
     GQL_PUBLISH_PRODUCT,
     {
       id: productId,
-      input: publications.map((publication) => ({
-        publicationId: publication.id,
-      })),
+      input: [{ publicationId }],
     },
     "Product publish failed"
   );
